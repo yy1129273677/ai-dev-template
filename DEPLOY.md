@@ -41,6 +41,10 @@
 | B. 本机构建 → 传镜像 `docker load` | **2G 小机器 / 基础镜像拉不动**（BMF、jisu 都用这个） | 本机 `build` → `docker save` → `scp` → 服务器 `docker load` → `up -d` | 多一步传输，需要本机 Docker |
 | C. 仓库内离线镜像 `*.tar.gz` | 目标机器完全断网 | 镜像 tar 随包携带，服务器 `docker load -i` 后 `up -d` | 仓库体积大（几百 MB），需定期更新 |
 | D. 本地只起数据库（开发） | 日常开发 | `docker compose -f docker-compose.dev.yml up -d` | 不是部署，见 `server/README.md` |
+> **一致性要求（重要）**：同一工作区 / 同一团队的项目，部署流程与脚本命名必须复用同一套——
+> 服务器放完整仓库（git clone）；本机 `deploy-images.ps1` + `deploy.cmd` 构建并上传镜像；
+> 服务器 `update.sh` 只做「拉代码 + 用已上传镜像重建 + 自检」；端口写死在 compose 里。
+> 参考 BMF（8081/3001）、jisu（8080/443）、陪易玩 ADS（8082/3002）。**不要每个新项目换一种流程。**
 
 ---
 
