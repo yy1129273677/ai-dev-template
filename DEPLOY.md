@@ -409,7 +409,7 @@ bash prune-dist.sh          # 保留 index.html 引用的 + 最近 5 个历史�
 2. **2G 机器在服务器 build 前端会 OOM / 卡死** → 本机构建 → `save/scp/load`。
 3. **迁移文件带 BOM** → PostgreSQL 报 `syntax error at or near ""`；用无 BOM UTF-8 写入。
 4. **Prisma 在 alpine 缺 openssl** → Dockerfile 里 `apk add --no-cache openssl`。
-5. **`class-validator` 未安装却注册了 ValidationPipe** → 启动直接报错；要么装齐，要么不注册（本项目用手写校验）。
+5. **`class-validator` / `nestjs-zod` 未安装却注册了对应 Pipe** → 启动直接报错；要么装齐，要么不注册。新增接口按 `AGENTS.md` §5.1 用 Zod 校验，存量接口维持原有校验方式。
 6. **前端请求库不支持某个 HTTP 方法**（如 `uni.request` 不支持 PATCH）→ 接口统一用 GET/POST/PUT/DELETE。
 7. **本机与服务端口冲突**（如本机已有 PostgreSQL 5432）→ 容器映射到 5435，生产不对外。
 8. **冒烟脚本跑第二次就红** → 固定测试账号导致断言不成立；用时间戳生成账号，脚本幂等。
