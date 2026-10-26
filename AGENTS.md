@@ -77,6 +77,7 @@
 1. **同类选型优先复用本项目既有栈**（后台类项目用 Element Plus 那套，移动端用 uni-app 那套，AI/RAG 类用 Express+LangChain 那套）。
 2. **换栈必须有 ADR**，并说明迁移成本与失败模式。
 3. **共同底线不变**：TypeScript、Prisma（有 ORM 时）、PostgreSQL、JWT/会话、Docker Compose、Prettier。
+4. **NestJS 新项目/新接口的输入校验统一用 Zod（配 `nestjs-zod`），存量项目不强制迁移。**
 
 ---
 
@@ -126,6 +127,7 @@ npm run seed                      # 初始化/演示数据（生产慎用）
 10. **测试后门只限非生产**：固定验证码、调试接口、默认口令在 `NODE_ENV=production` 必须失效（宁可启动报错，也不要静默放行）。
 11. **危险操作先确认**：删库、覆盖数据、重置仓库、改系统配置、`git push --force`，必须明确得到用户同意。
 12. **密钥不进代码**：`.env` 只提交 `.env.example`；发现硬编码密钥先报告再处理。
+13. **NestJS 新增接口必须用 Zod schema 校验请求体/query/params，存量接口不回改；不允许 `any` 或未校验 body 进业务层。**
 
 ---
 
@@ -153,6 +155,91 @@ npm run seed                      # 初始化/演示数据（生产慎用）
 7. 自检：`npx tsc --noEmit -p tsconfig.json`。
 8. 参考实现：BMF 的 `table-config` / `auth` 模块、ADS 的 `auth` / `orders` / `audits` 模块。
 
+### 5.1 输入校验：Zod（新增接口硬性要求）
+
+> 存量项目不强制迁移 Zod。**现有接口不回改**，只在新增接口生效。存量项目若还没接 Zod，沿用第 4 条的 DTO 写法即可，两者可并存。
+
+#### 依赖与选型
+
+- 使用 `zod` + `nestjs-zod`（仅写约定，不要求现装）。
+- NestJS 新接口的请求体/body/query/params 统一用 Zod schema 做输入校验；不允许 `any` 或未校验 body 进业务层。
+
+#### 文件位置与命名
+
+| 约定 | 说明 |
+| ---- | ---- |
+| 文件 | 模块目录下 `xxx.schema.ts` |
+| Schema 导出 | 一个 schema 一个导出，命名 `<动作><实体>Schema`（如 `CreateUserSchema`、`UpdateRoleSchema`） |
+
+#### 类型来源单一
+
+- TS 类型一律通过 `z.infer<typeof schema>` 获取，禁止再手写一份重复的 `interface` / `type`。
+
+#### 创建 DTO 并绑定校验
+
+```typescript
+import { createZodDto } from 'nestjs-zod';
+
+export class CreateUserDto extends createZodDto(CreateUserSchema) {}
+```
+
+在 controller 中直接使用：
+
+```typescript
+@Post()
+create(@Body() body: CreateUserDto) {
+  // body 已由 ZodValidationPipe 校验，类型安全
+}
+```
+
+全局配置（可选，推荐放在 `main.ts`）：
+
+```typescript
+import { ZodValidationPipe } from 'nestjs-zod';
+app.useGlobalPipes(new ZodValidationPipe());
+```
+
+也可单独在每个路由上指定 pipe：
+
+```typescript
+@Body(new ZodValidationPipe()) body: CreateUserDto
+```
+
+#### schema 编写规范
+
+- **拒绝未知字段**：schema 末尾调用 `.strict()`，多余字段直接返回 400。
+- **中文 message**：`.optional().default(...)` 或 `.describe("中文说明")`，错误信息统一返回中文。
+- **统一 400**：Zod 校验失败统一映射为 HTTP 400，不泄露内部结构。
+- **示例值**：用 `.example()` 提供真实可用的 example，禁止 `"string"` 占位。
+- **枚举**：用 `z.enum([...])` 而非 `z.nativeEnum`，保持纯 JS 兼容性。
+
+示例：
+
+```typescript
+import { z } from 'zod';
+
+export const CreateUserSchema = z.object({
+  username: z.string().min(2).max(32).describe('用户名，2~32 个字符'),
+  email: z.string().email('邮箱格式不正确').describe('邮箱地址'),
+  age: z.number().int().min(1).max(150).optional().describe('年龄，1~150'),
+  role: z.enum(['admin', 'editor', 'viewer']).default('viewer').describe('角色'),
+}).strict();
+
+export type CreateUserInput = z.infer<typeof CreateUserSchema>;
+```
+
+#### Swagger 自动生成
+
+- 使用 `nestjs-zod` 提供的 OpenAPI 集成，`createZodDto` 生成的 DTO 自动携带 zod schema 的元数据到 Swagger UI。
+- 不再需要手写 `@ApiProperty` 装饰器（Swagger 会直接从 Zod schema 读取描述和约束）。
+- 存量未迁移项目的接口继续保留 `@ApiProperty` 不动，两者不影响共存。
+
+#### 存量共存策略
+
+- `nestjs-zod` 的 `ZodValidationPipe` 可以与 class-validator 的 `ValidationPipe` 并存于同一个 NestJS 应用。
+- 迁移是「改到哪个接口就顺手迁哪个」，不搞全量回改。
+- **现有接口一律不回改，Zod 校验只在新增接口生效。**
+
 ---
 
 ## 6. 后端安全基线
@@ -161,7 +248,7 @@ npm run seed                      # 初始化/演示数据（生产慎用）
 | -- | ---- |
 | 认证 | 全局守卫默认保护；放行必须显式声明；JWT 有效期合理（7 天级别），角色变更可接受延迟 |
 | 授权 | 权限码集中定义在一处（`permissions.ts`），角色→权限矩阵可单测；新权限同步文档表格 |
-| 输入 | 静态结构用 DTO；动态字段必须白名单过滤 + 类型转换；不要开 `whitelist:true` 除非全部 DTO 都有校验装饰器 |
+| 输入 | 新增接口用 Zod schema 校验；存量接口沿用 DTO；动态字段必须白名单过滤 + 类型转换；不要开 `whitelist:true` 除非全部 DTO 都有校验装饰器 |
 | 响应 | 显式 `select` / 手工白名单；敏感字段不返回 |
 | 限流 | `@nestjs/throttler`：全局 120 次/分钟/IP；验证码、登录、上传、导出单独收紧；探活豁免 |
 | 安全头 | helmet 开启；CSP 由 Nginx 管 |
@@ -196,7 +283,7 @@ npm run prisma:migrate:deploy
 
 | 层 | 测什么 | 放哪 | 是否连库 |
 | -- | ------ | ---- | -------- |
-| 后端单测 | 价格/上限/排序/权限矩阵/校验器/状态机纯函数 | `server/src/**/*.spec.ts` | ❌ |
+| 后端单测 | 价格/上限/排序/权限矩阵/校验器/状态机纯函数；Zod schema 边界用例（必填、类型、枚举、上下限、多余字段拒绝） | `server/src/**/*.spec.ts` | ❌ |
 | 约定扫描 | 每个路由有 `@ApiOperation`、受保护 controller 有 `@ApiBearerAuth`、不用 `any` 接 `@Body()` | `controller-conventions.spec.ts` | ❌ |
 | 前端单测 | 格式化/校验/纯计算 | `client/tests/*.spec.ts` | ❌ |
 | e2e 冒烟 | 注册→审核→核心流程→权限兜底 | `server/test/*.mjs`（独立脚本） | ✅ |
@@ -266,7 +353,7 @@ AI 必须遵守：
 | 约定文件 | AGENTS 两部分（含"常见业务改动怎么做"） | AGENTS 两部分（含术语铁律、权限清单） | 无 | **补 AGENTS 两部分** |
 | 需求文档 | requirements 001–004 + 整理版 | requirements 原文 + design 拆解 | 无 | 原文进 requirements，拆解进 design |
 | 设计文档 | context/domain/flows/states/rules/failure/security + ADR + glossary + diagrams | 拆解/架构/数据/接口/页面/状态机/安全 + ADR | 无 | design 分层 + ADR + glossary |
-| 安全 | 多租户 systemId、RBAC、动态标识符校验、class-validator | 单租户三角色、权限矩阵、手写校验、上传四重校验、限流 | Cookie 会话、htpasswd、自签 HTTPS | 认证+授权+输入+响应+限流+上传+备份 |
+| 安全 | 多租户 systemId、RBAC、动态标识符校验、class-validator | 单租户三角色、权限矩阵、手写校验、上传四重校验、限流 | Cookie 会话、htpasswd、自签 HTTPS | 认证+授权+输入+响应+限流+上传+备份；**新接口统一 Zod，存量 class-validator / 手写校验保留** |
 | 测试 | jest 单测 + 约定扫描（推测） | 71 单测 + 11 前端测试 + 41 项冒烟 | 无 | 单测不连库 + e2e 脚本 + 约定扫描 |
 | 部署 | compose + 离线镜像 + deploy 脚本 | compose + dev compose + 运维/验收/踩坑 | compose + 自签 HTTPS + 离线镜像 + 详细验收 | 统一 DEPLOY.md 结构 |
 | 最值得抄的 | 业务改动 SOP、权限码清单、动态表格校验 | 需求拆解→确认、状态机文档、冒烟脚本、防并发 | 部署手册详尽度、HTTPS/离线镜像、验收 curl | 三者互补，见 §9/§10 |
@@ -320,7 +407,7 @@ AI 必须遵守：
 - [ ] `client`: `npm run typecheck` + `npm test` + `npm run build` 全绿
 - [ ] `npx prettier@3.7.4 --check .` 全绿
 - [ ] 改了 schema：迁移文件人工检查过，`migrate deploy` 通过，无 `migrate dev`
-- [ ] 新接口：有守卫、有输入校验/白名单、有 Swagger 元数据、响应字段安全
+- [ ] 新接口：有守卫、有输入校验/白名单（Zod schema）、有 Swagger 元数据、响应字段安全
 - [ ] 新权限码：`permissions.ts` 与文档权限表同步
 - [ ] e2e 冒烟通过（含权限兜底：未登录 401、越权 403）
 - [ ] `DEPLOY.md` 的验收清单能照着跑通（至少本地 compose 起一遍）
